@@ -1,0 +1,9 @@
+{
+    "cSpell.words": [
+        "println"
+    ],
+    "files.associations": {
+        "*.tpp": "cpp",
+        "chip.h": "c"
+    }
+}
