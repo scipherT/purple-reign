@@ -14,17 +14,19 @@ union midiPacket4_t {
 
 CircularBuffer<uint32_t,100> midiBuffer4;
 
-const int numAdcRanges = 3; 
-const int numAdcRangeBorders = numAdcRanges + 1; // N ranges values yields N+1 range values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range values.
 
-struct adcToCtrlAdj{
-  uint16_t adcRangeBorder[numAdcRangeBorders]; // Defines the ADC ranges [adcRangeBorder[0]..adcRangeBorder[1]] , [adcRangeBorder[1]..adcRangeBorder[2]] , ... , [adcRangeBorder[numAdcRangeBorders-2]..adcRangeBorder[numAdcRangeBorders-1]]
-  double k[numAdcRanges]; // Gains for ADC values in the ranges defined by adcRangeBorder[]
-  uint16_t m[numAdcRanges]; // Offsets for ADC values in the ranges defined by adcRangeBorder[]
+struct adcToCtrlMap{
+  static const int maxNumAdcRanges = 10; 
+  static const int maxNumAdcRangeBorders = maxNumAdcRanges + 1; // N ranges values yields N+1 range values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range values.
+  int numAdcRanges = 0; 
+  int numAdcRangeBorders = 0; // N ranges values yields N+1 range values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range values.  
+  uint16_t adcRangeBorder[maxNumAdcRangeBorders]; // Defines the ADC ranges [adcRangeBorder[0]..adcRangeBorder[1]] , [adcRangeBorder[1]..adcRangeBorder[2]] , ... , [adcRangeBorder[numAdcRangeBorders-2]..adcRangeBorder[numAdcRangeBorders-1]]
+  double k[maxNumAdcRanges]; // Slope of the linear equation that maps ADC values in the ranges defined by adcRangeBorder[] to controller values.
+  uint16_t m[maxNumAdcRanges]; // Y-intercept of the linear equation that maps ADC values in the ranges defined by adcRangeBorder[] to controller values.
 };
 
-const int numAdcToCtrlAdjArrElements = 16; // Defines the maximum number of ADC value to MIDI controller value mappings that can be done simultaneously.
-adcToCtrlAdj adcToCtrlAdjArr[numAdcToCtrlAdjArrElements];
+const int numAdcToCtrlMapArrElements = 16; // Defines the maximum number of different ADC value to MIDI controller value mappings that can be done simultaneously.
+adcToCtrlMap adcToCtrlMapArr[numAdcToCtrlMapArrElements];
 
 // adcValue0 <= adcValue1 <= adcValue2 <= adcValue3
 //
@@ -38,41 +40,41 @@ adcToCtrlAdj adcToCtrlAdjArr[numAdcToCtrlAdjArrElements];
 //
 // Linear mapping is done by using the well known formula (y = k*x + m). Since the full resulting mapping is a sequence of linear segments, residing inside their given (sub)range, the parameters k and m must be calculated in such a way that the segments meet on each border between ranges.
   
-void setAdcToCtrlAdj(adcToCtrlAdj *aTCA, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1, uint16_t adcBorder2, uint16_t ctrlBorder2, uint16_t adcBorder3, uint16_t ctrlBorder3) {
-  aTCA->adcRangeBorder[0] = adcBorder0;
-  aTCA->m[0] = ctrlBorder0;
-  aTCA->k[0] = (ctrlBorder1 - ctrlBorder0) / (adcBorder1 - adcBorder0); //k = (y1 - y0) / (x1 - x0)
-  aTCA->adcRangeBorder[1] = adcBorder1;
-  aTCA->m[1] = ctrlBorder1;
-  aTCA->k[1] = (ctrlBorder2 - ctrlBorder1) / (adcBorder2 - adcBorder1); //k = (y2 - y1) / (x2 - x1)
-  aTCA->adcRangeBorder[2] = adcBorder2;
-  aTCA->m[2] = ctrlBorder2;
-  aTCA->k[2] = (ctrlBorder3 - ctrlBorder2) / (adcBorder3 - adcBorder2); //k = (y3 - y2) / (x3 - x2)
-  aTCA->adcRangeBorder[3] = adcBorder3;
+void setAdcToCtrlMap3(adcToCtrlMap *aTCM, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1, uint16_t adcBorder2, uint16_t ctrlBorder2, uint16_t adcBorder3, uint16_t ctrlBorder3) {
+  aTCM->numAdcRanges = 3;
+  aTCM->numAdcRangeBorders = aTCM->numAdcRanges + 1;
+  aTCM->adcRangeBorder[0] = adcBorder0;
+  aTCM->m[0] = ctrlBorder0;
+  aTCM->k[0] = (ctrlBorder1 - ctrlBorder0) / (adcBorder1 - adcBorder0); //k = (y1 - y0) / (x1 - x0)
+  aTCM->adcRangeBorder[1] = adcBorder1;
+  aTCM->m[1] = ctrlBorder1;
+  aTCM->k[1] = (ctrlBorder2 - ctrlBorder1) / (adcBorder2 - adcBorder1); //k = (y2 - y1) / (x2 - x1)
+  aTCM->adcRangeBorder[2] = adcBorder2;
+  aTCM->m[2] = ctrlBorder2;
+  aTCM->k[2] = (ctrlBorder3 - ctrlBorder2) / (adcBorder3 - adcBorder2); //k = (y3 - y2) / (x3 - x2)
+  aTCM->adcRangeBorder[3] = adcBorder3;
 }
 
 // uint16_t is the return value type of choice since the greatest controller value (pitch-bend included) in MIDI 1.0 fits in 14 bits.  
 // 
-// If the adcToCtrlAdj struct contains too high gain values or too high offset values in relation to the ADC value, the return value might overflow (i.e.; > (2^16)-1)
+// If the adcToCtrlMap struct contains too high gain values or too high offset values in relation to the ADC value, the return value might overflow (i.e.; > (2^16)-1)
 // This can be avoided if the gain and offset values are kept low enough in relation to the ADC value. 
 // The worst case scenarios to consider are the resulting return value for all range border value calculations: 
-// (adcValue * aTCA->gain[ix]) + aTCA->offset[ix]), where (adcValue = aTCA->adcRangeBorder[ix]) for all ix = [0..numAdcRanges]
+// (adcValue * aTCM->gain[ix]) + aTCM->offset[ix]), where (adcValue = aTCM->adcRangeBorder[ix]) for all ix = [0..numAdcRanges]
 // Please check your calculations when setting the gain, offset and border values to make sure that these worst case scenarios do not overflow.
 // 
-uint16_t adcToCtrl(adcToCtrlAdj *aTCA, uint16_t adcValue) {
-  if (adcValue <  aTCA->adcRangeBorder[0])
-    return (aTCA->m[0]);
-  for (uint8_t ix = 1; ix < numAdcRangeBorders; ix++) { // Iterate over the number of ADC range borders, starting at 1 since we already checked ix = 0.
-    if (adcValue < aTCA->adcRangeBorder[ix]) // ADC value is between two borders; the current index and the previous one, which we should have already checked (in previous iteration or before iteration started). So a single comparison operator suffices to find each succeeding interval.
-      return (((adcValue - aTCA->adcRangeBorder[ix-1]) * aTCA->k[ix-1]) + aTCA->m[ix-1]); // since the range 
+uint16_t adcToCtrl(adcToCtrlMap *aTCM, uint16_t adcValue) {
+  if (adcValue <  aTCM->adcRangeBorder[0])
+    return (aTCM->m[0]);
+  for (uint8_t ix = 1; ix < aTCM->numAdcRangeBorders; ix++) { // Iterate over the number of ADC range borders, starting at 1 since we already checked ix = 0.
+    if (adcValue < aTCM->adcRangeBorder[ix]) // ADC value is between two borders; the current index and the previous one, which we should have already checked (in previous iteration or before iteration started). So a single comparison operator suffices to find each succeeding interval.
+      return (((adcValue - aTCM->adcRangeBorder[ix-1]) * aTCM->k[ix-1]) + aTCM->m[ix-1]); // since the range 
   } 
   // If no previous range was matched, then ADC value belongs to the highest range and should return the calculated value at the highest ADC border, "pegged".
-  return ((( aTCA->adcRangeBorder[numAdcRangeBorders-1] - aTCA->adcRangeBorder[numAdcRangeBorders-2]) // The delta of the borders of the highest range... (as if the ADC value had gotten stuck on the high border of the highest range)
-    * aTCA->k[numAdcRangeBorders-2]) // multiplied by the coefficient from the highest range...
-    + aTCA->m[numAdcRangeBorders-2]); // and then added the offset from the highest range...
+  return ((( aTCM->adcRangeBorder[aTCM->numAdcRangeBorders-1] - aTCM->adcRangeBorder[aTCM->numAdcRangeBorders-2]) // The delta of the borders of the highest range... (as if the ADC value had gotten stuck on the high border of the highest range)
+    * aTCM->k[aTCM->numAdcRangeBorders-2]) // multiplied by the coefficient from the highest range...
+    + aTCM->m[aTCM->numAdcRangeBorders-2]); // and then added the offset from the highest range...
 }
-
-// setAdcToCtrlAdj(adcToCtrlAdjArr[0], 500, 0, 2040, 64, 2056, 64, 3500, 127);
 
 
 size_t sendNoteOn(byte note, byte velocity, byte channel) {
@@ -680,6 +682,14 @@ void setup() {
 
     initPinA();
     initPinB();
+
+
+    /////////////////////////////////////////////////////////////////////////
+    // Configure midi controller mappings
+    /////////////////////////////////////////////////////////////////////////
+    
+    // setAdcToCtrlMap(adcToCtrlMap *aTCM, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1, uint16_t adcBorder2, uint16_t ctrlBorder2, uint16_t adcBorder3, uint16_t ctrlBorder3) {
+
 
     /////////////////////////////////////////////////////////////////////////
     // Configure ADC
