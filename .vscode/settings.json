@@ -4,6 +4,7 @@
     ],
     "files.associations": {
         "*.tpp": "cpp",
-        "chip.h": "c"
+        "chip.h": "c",
+        "cstdint": "cpp"
     }
 }

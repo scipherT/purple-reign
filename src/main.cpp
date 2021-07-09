@@ -3,9 +3,39 @@
 
 #include <CircularBuffer.h>
 
-//
+// #define NDEBUG
+
+#include <cassert>
+
+
+//////////////////////////////////////////////
 // MIDI and buffers
-//
+//////////////////////////////////////////////
+
+// MIDI CC numbers
+
+const int ccNumModulationMSB = 1;
+const int ccNumModulation = ccNumModulationMSB;
+const int ccNumModulationLSB = ccNumModulationMSB + 32;
+
+const int ccNumGeneralPurpose1MSB = 16;
+const int ccNumGeneralPurpose1 = ccNumGeneralPurpose1MSB;
+const int ccNumGeneralPurpose1LSB = ccNumGeneralPurpose1MSB + 32;
+
+const int ccNumGeneralPurpose2MSB = 17;
+const int ccNumGeneralPurpose2 = ccNumGeneralPurpose2MSB;
+const int ccNumGeneralPurpose2LSB = ccNumGeneralPurpose2MSB + 32;
+
+const int ccNumGeneralPurpose3MSB = 18;
+const int ccNumGeneralPurpose3 = ccNumGeneralPurpose3MSB;
+const int ccNumGeneralPurpose3LSB = ccNumGeneralPurpose3MSB + 32;
+
+const int ccNumGeneralPurpose4MSB = 19;
+const int ccNumGeneralPurpose4 = ccNumGeneralPurpose4MSB;
+const int ccNumGeneralPurpose4LSB = ccNumGeneralPurpose4MSB + 32;
+
+
+// MIDI data structures and functions
 
 union midiPacket4_t {
   uint32_t data32bit;
@@ -15,19 +45,51 @@ union midiPacket4_t {
 CircularBuffer<uint32_t,100> midiBuffer4;
 
 
-struct adcToCtrlMap{
+struct adcToCtrlMap_t {
   static const int maxNumAdcRanges = 10; 
-  static const int maxNumAdcRangeBorders = maxNumAdcRanges + 1; // N ranges values yields N+1 range values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range values.
+  static const int maxNumAdcRangeBorders = maxNumAdcRanges + 1; // N range values yields N+1 range border values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range border values.
   int numAdcRanges = 0; 
-  int numAdcRangeBorders = 0; // N ranges values yields N+1 range values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range values.  
+  int numAdcRangeBorders = 0; // N range values yields N+1 range border values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range border values.  
   uint16_t adcRangeBorder[maxNumAdcRangeBorders]; // Defines the ADC ranges [adcRangeBorder[0]..adcRangeBorder[1]] , [adcRangeBorder[1]..adcRangeBorder[2]] , ... , [adcRangeBorder[numAdcRangeBorders-2]..adcRangeBorder[numAdcRangeBorders-1]]
   double k[maxNumAdcRanges]; // Slope of the linear equation that maps ADC values in the ranges defined by adcRangeBorder[] to controller values.
   uint16_t m[maxNumAdcRanges]; // Y-intercept of the linear equation that maps ADC values in the ranges defined by adcRangeBorder[] to controller values.
 };
 
+const int atcmIxPitchbend = 0;
+const int atcmIxModulation = 1;
 const int numAdcToCtrlMapArrElements = 16; // Defines the maximum number of different ADC value to MIDI controller value mappings that can be done simultaneously.
-adcToCtrlMap adcToCtrlMapArr[numAdcToCtrlMapArrElements];
+adcToCtrlMap_t adcToCtrlMapArr[numAdcToCtrlMapArrElements];
 
+struct adcCtrlPair_t {
+  uint16_t adcValue;
+  uint16_t ctrlValue;
+};
+typedef adcCtrlPair_t borderList_t[];
+
+// setAdcToCtrlMap1(): Set map with one (1) range (and consequently two (2) borders)
+//
+// adcValue0 <= adcValue1
+//
+// ctrlValue0 <= ctrlValue1
+//
+//  * ADC values <= adcValue0 are mapped to ctrlValue0
+//  * ADC values >= adcValue1 are mapped to ctrlValue1
+//  * ADC values in the range [adcValue0..adcValue1] are mapped linearly to the range [ctrlValue0..ctrlValue1]
+//
+// Linear mapping is done by using the well known formula (y = k*x + m). Since the full resulting mapping is a sequence of (one or more) linear segments, residing inside their given (sub)range, the parameters k and m must be calculated in such a way that the segments meet on each border between ranges.
+  
+void setAdcToCtrlMap1(adcToCtrlMap_t *aTCM, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1) {
+  assert(aTCM);
+  aTCM->numAdcRanges = 1;
+  aTCM->numAdcRangeBorders = aTCM->numAdcRanges + 1;
+  aTCM->adcRangeBorder[0] = adcBorder0;
+  aTCM->m[0] = ctrlBorder0;
+  aTCM->k[0] = (ctrlBorder1 - ctrlBorder0) / (adcBorder1 - adcBorder0); //k = (y1 - y0) / (x1 - x0)
+  aTCM->adcRangeBorder[1] = adcBorder1;
+}
+
+// setAdcToCtrlMap3(): Set map with three (3) ranges (and consequently four (4) borders)
+//
 // adcValue0 <= adcValue1 <= adcValue2 <= adcValue3
 //
 // ctrlValue0 <= ctrlValue1 <= ctrlValue2 <= ctrlValue3
@@ -38,9 +100,11 @@ adcToCtrlMap adcToCtrlMapArr[numAdcToCtrlMapArrElements];
 //  * ADC values in the range [adcValue1..adcValue2] are mapped linearly to the range [ctrlValue1..ctrlValue2]
 //  * ADC values in the range [adcValue2..adcValue3] are mapped linearly to the range [ctrlValue2..ctrlValue3]
 //
-// Linear mapping is done by using the well known formula (y = k*x + m). Since the full resulting mapping is a sequence of linear segments, residing inside their given (sub)range, the parameters k and m must be calculated in such a way that the segments meet on each border between ranges.
-  
-void setAdcToCtrlMap3(adcToCtrlMap *aTCM, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1, uint16_t adcBorder2, uint16_t ctrlBorder2, uint16_t adcBorder3, uint16_t ctrlBorder3) {
+// Linear mapping is done by using the well known formula (y = k*x + m). Since the full resulting mapping is a sequence of (one or more) linear segments, residing inside their given (sub)range, the parameters k and m must be calculated in such a way that the segments meet on each border between ranges.
+
+
+void setAdcToCtrlMap3(adcToCtrlMap_t *aTCM, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1, uint16_t adcBorder2, uint16_t ctrlBorder2, uint16_t adcBorder3, uint16_t ctrlBorder3) {
+  assert(aTCM);
   aTCM->numAdcRanges = 3;
   aTCM->numAdcRangeBorders = aTCM->numAdcRanges + 1;
   aTCM->adcRangeBorder[0] = adcBorder0;
@@ -55,15 +119,89 @@ void setAdcToCtrlMap3(adcToCtrlMap *aTCM, uint16_t adcBorder0, uint16_t ctrlBord
   aTCM->adcRangeBorder[3] = adcBorder3;
 }
 
-// uint16_t is the return value type of choice since the greatest controller value (pitch-bend included) in MIDI 1.0 fits in 14 bits.  
+
+void setAdcToCtrlMap10(adcToCtrlMap_t *aTCM, \
+  uint16_t adcBorder0, uint16_t ctrlBorder0, \
+  uint16_t adcBorder1, uint16_t ctrlBorder1, \
+  uint16_t adcBorder2, uint16_t ctrlBorder2, \
+  uint16_t adcBorder3, uint16_t ctrlBorder3, \
+  uint16_t adcBorder4, uint16_t ctrlBorder4, \
+  uint16_t adcBorder5, uint16_t ctrlBorder5, \
+  uint16_t adcBorder6, uint16_t ctrlBorder6, \
+  uint16_t adcBorder7, uint16_t ctrlBorder7, \
+  uint16_t adcBorder8, uint16_t ctrlBorder8, \
+  uint16_t adcBorder9, uint16_t ctrlBorder9, \
+  uint16_t adcBorder10, uint16_t ctrlBorder10) {
+  assert(aTCM);
+  aTCM->numAdcRanges = 10;
+  aTCM->numAdcRangeBorders = aTCM->numAdcRanges + 1;
+  // border 0 (first border)
+  aTCM->adcRangeBorder[0] = adcBorder0;
+  aTCM->m[0] = ctrlBorder0;
+  aTCM->k[0] = (ctrlBorder1 - ctrlBorder0) / (adcBorder1 - adcBorder0); //k = (y1 - y0) / (x1 - x0)
+  // border 1
+  aTCM->adcRangeBorder[1] = adcBorder1;
+  aTCM->m[1] = ctrlBorder1;
+  aTCM->k[1] = (ctrlBorder2 - ctrlBorder1) / (adcBorder2 - adcBorder1); //k = (y2 - y1) / (x2 - x1)
+  // border 2
+  aTCM->adcRangeBorder[2] = adcBorder2;
+  aTCM->m[2] = ctrlBorder2;
+  aTCM->k[2] = (ctrlBorder3 - ctrlBorder2) / (adcBorder3 - adcBorder2); //k = (y3 - y2) / (x3 - x2)
+  // border 3
+  aTCM->adcRangeBorder[3] = adcBorder3;
+  aTCM->m[3] = ctrlBorder3;
+  aTCM->k[3] = (ctrlBorder4 - ctrlBorder3) / (adcBorder4 - adcBorder3); //k = (y4 - y3) / (x4 - x3)
+  // border 4
+  aTCM->adcRangeBorder[4] = adcBorder4;
+  aTCM->m[4] = ctrlBorder4;
+  aTCM->k[4] = (ctrlBorder5 - ctrlBorder4) / (adcBorder5 - adcBorder4); //k = (y5 - y4) / (x5 - x4)
+  // border 5
+  aTCM->adcRangeBorder[5] = adcBorder5;
+  aTCM->m[5] = ctrlBorder5;
+  aTCM->k[5] = (ctrlBorder6 - ctrlBorder5) / (adcBorder6 - adcBorder5); //k = (y6 - y5) / (x6 - x5)
+  // border 6
+  aTCM->adcRangeBorder[6] = adcBorder6;
+  aTCM->m[6] = ctrlBorder6;
+  aTCM->k[6] = (ctrlBorder7 - ctrlBorder6) / (adcBorder7 - adcBorder6); //k = (y7 - y6) / (x7 - x6)
+  // border 7
+  aTCM->adcRangeBorder[7] = adcBorder7;
+  aTCM->m[7] = ctrlBorder7;
+  aTCM->k[7] = (ctrlBorder8 - ctrlBorder7) / (adcBorder8 - adcBorder7); //k = (y8 - y7) / (x8 - x7)
+  // border 8
+  aTCM->adcRangeBorder[8] = adcBorder8;
+  aTCM->m[8] = ctrlBorder8;
+  aTCM->k[8] = (ctrlBorder9 - ctrlBorder8) / (adcBorder9 - adcBorder8); //k = (y9 - y8) / (x9 - x8)
+  // border 9
+  aTCM->adcRangeBorder[9] = adcBorder9;
+  aTCM->m[9] = ctrlBorder9;
+  aTCM->k[9] = (ctrlBorder10 - ctrlBorder9) / (adcBorder10 - adcBorder9); //k = (y10 - y9) / (x10 - x9)
+  // last border
+  aTCM->adcRangeBorder[10] = adcBorder10;
+}
+
+void setAdcToCtrlMap(adcToCtrlMap_t *aTCM, int numBorders, borderList_t bL) {
+  assert(numBorders >= 2);
+  assert(aTCM);
+  aTCM->numAdcRanges = numBorders - 1;
+  aTCM->numAdcRangeBorders = numBorders; 
+  for (int border = 0; border < (numBorders - 1); border++)
+  {  
+    aTCM->adcRangeBorder[border] = bL[border].adcValue;
+    aTCM->m[border] = bL[border].ctrlValue;
+    aTCM->k[border] = (bL[border + 1].ctrlValue - bL[border].ctrlValue) / (bL[border + 1].adcValue - bL[border].adcValue); //k<n> = (y<n+1> - y<n>) / (x<n+1> - x<n>)
+  }
+  aTCM->adcRangeBorder[numBorders - 1] = bL[numBorders - 1].adcValue;
+}
+
+// uint16_t is the return value type of choice since the greatest controller value (pitch-bend included) in MIDI 1.0 do not exceed 14 bit size.  
 // 
 // If the adcToCtrlMap struct contains too high gain values or too high offset values in relation to the ADC value, the return value might overflow (i.e.; > (2^16)-1)
-// This can be avoided if the gain and offset values are kept low enough in relation to the ADC value. 
-// The worst case scenarios to consider are the resulting return value for all range border value calculations: 
-// (adcValue * aTCM->gain[ix]) + aTCM->offset[ix]), where (adcValue = aTCM->adcRangeBorder[ix]) for all ix = [0..numAdcRanges]
+// This can be avoided if the gain (k) and offset (m) values are kept low enough in relation to the ADC value. 
+// The worst case scenarios to consider are the resulting values for all range border value calculations: 
+// (adcValue * aTCM->k[ix]) + aTCM->m[ix]), where (adcValue = aTCM->adcRangeBorder[ix]) for all ix = [0..numAdcRanges]
 // Please check your calculations when setting the gain, offset and border values to make sure that these worst case scenarios do not overflow.
 // 
-uint16_t adcToCtrl(adcToCtrlMap *aTCM, uint16_t adcValue) {
+uint16_t adcToCtrl(adcToCtrlMap_t *aTCM, uint16_t adcValue) {
   if (adcValue <  aTCM->adcRangeBorder[0])
     return (aTCM->m[0]);
   for (uint8_t ix = 1; ix < aTCM->numAdcRangeBorders; ix++) { // Iterate over the number of ADC range borders, starting at 1 since we already checked ix = 0.
@@ -118,23 +256,35 @@ void enqueueNoteOff(byte note, byte velocity, byte channel) {
 }
 
 
-void enqueuePitchBend(uint16_t val, byte channel) {
+void enqueuePitchBend(uint16_t adcVal, byte channel) {
 	midiPacket4_t data;
-  uint16_t v = (val);
+  uint16_t ctrlVal = adcToCtrl(&adcToCtrlMapArr[atcmIxPitchbend], adcVal);
 	data.data8bit[0] = 0x0E;
 	data.data8bit[1] = 0xE0 | channel;
-	data.data8bit[2] = val & 0x7Fu; // filter out the 7 LSbits
-	data.data8bit[3] = (val << 7) & (0x7Fu << 7); // filter out the 7 MSbits
+	data.data8bit[2] = ctrlVal & 0x7Fu; // filter out the 7 LSbits (="fine")
+	data.data8bit[3] = (ctrlVal << 7) & (0x7Fu << 7); // filter out the 7 MSbits (="coarse")
   midiBuffer4.push(data.data32bit);
 }
 
-void enqueueModulation(uint16_t val, byte channel) {
+// TODO: Fix handling of 2 messages according to MIDI 1.0 specs
+//  * MSB needs not be resent if only LSB is sent. Receiver should interpret it as a "fine adjustment"
+//  * If MSB is sent ("coarse adjustment"), LSB will automatically be "reset" to 0 by receiver.
+//
+// TODO: Fix handling of 1 or 2 messages. User needs to be able to select (in the function or globally) if 7-bit or 14-bit resolution should be assumed.
+
+void enqueueCC(uint8_t ccNum, uint16_t adcVal, byte channel) {
 	midiPacket4_t data;
+  uint16_t ctrlVal = adcToCtrl(&adcToCtrlMapArr[atcmIxModulation], adcVal);
 	data.data8bit[0] = 0x0B;
 	data.data8bit[1] = 0xB0 | channel;
-	data.data8bit[2] = 0x01;
-	data.data8bit[3] = val;
-  midiBuffer4.push(data.data32bit);
+  data.data8bit[2] = ccNum;
+	data.data8bit[3] = (ctrlVal << 7) & (0x7Fu << 7); // filter out the 7 MSbits
+  midiBuffer4.push(data.data32bit); // push modulation MSB message (msg #1)
+  if (ccNum < 32) {
+    data.data8bit[2] = ccNum + 32;
+    data.data8bit[3] = ctrlVal & 0x7Fu; // filter out the 7 LSbits
+    midiBuffer4.push(data.data32bit); // push modulation LSB message (msg #2)
+  }
 }
 
 
@@ -222,7 +372,9 @@ unsigned long _nextTickMajor = 0; // time stamp in microseconds indicating next 
 unsigned long _nextTickMinor = 0; // time stamp in microseconds indicating next absolute time to perform a Minor "tick"
 unsigned long _nextTickADC = 0; // time stamp in microseconds indicating next absolute time to perform an ADC "tick"
 
-uint16_t adcChVal0, adcChVal1, adcChValPrev0, adcChValPrev1 = 0;
+// uint16_t adcValCh0, adcValCh1, adcValCh2, adcValCh3, adcValCh4, adcValCh5 = 0;
+uint16_t adcValPrevCh0, adcValPrevCh1, adcValPrevCh2, adcValPrevCh3, adcValPrevCh4, adcValPrevCh5 = 0;
+
 
 // int _rowPin; // remember the row Pin from previous lap in the current scan loop (or, if current lap is the first; from the last lap in the previous scan loop)
 uint32_t _rowPortBitPattern; // Remember the row port bit pattern from previous lap in the current scan loop (or, if current lap is the first; from the last lap in the previous scan loop)
@@ -773,11 +925,14 @@ void setup() {
       // Start first ADC conversion
       adc_start(ADC);
 
-      delayMicroseconds(1000); // Wait 1 ms, should be enough to finish conversion of all (<16) channels, even at slowest conversion rate (~50kS/s)
+      delayMicroseconds(1000); // Wait 1 ms, should be enough to finish conversion of all (<=16) channels, even at slowest conversion rate (~50kS/s)
 
-      adcChValPrev0 = adc_get_channel_value(ADC, ADC_CHANNEL_0); // Connected to pitch bend
-      adcChValPrev1 = adc_get_channel_value(ADC, ADC_CHANNEL_1); // Connected to modulation wheel
-
+      adcValPrevCh0 = adc_get_channel_value(ADC, ADC_CHANNEL_0); // Connected to pitch bend
+      adcValPrevCh1 = adc_get_channel_value(ADC, ADC_CHANNEL_1); // Connected to modulation wheel
+      adcValPrevCh2 = adc_get_channel_value(ADC, ADC_CHANNEL_2); // Connected to general purposse controller 1
+      adcValPrevCh3 = adc_get_channel_value(ADC, ADC_CHANNEL_3); // Connected to general purposse controller 2
+      adcValPrevCh4 = adc_get_channel_value(ADC, ADC_CHANNEL_4); // Connected to general purposse controller 3
+      adcValPrevCh5 = adc_get_channel_value(ADC, ADC_CHANNEL_5); // Connected to general purposse controller 4
     }
 
     // delayMicroseconds(10);  // Delay needed to give time for row pin signal to settle for very first read
@@ -983,14 +1138,34 @@ void loop() {
       _nextTickADC = microSeconds - (microSeconds % _tickDeltaADC) + _tickDeltaADC; // FF to closest future _nextTickADC
 
       // handle ADC channel 0 (pitch bend)
-      int adcChVal0 = adc_get_channel_value(ADC, ADC_CHANNEL_0); // Connected to pitch bend
-      if (adcChVal0 != adcChValPrev0) enqueuePitchBend(adcChVal0,1);
-      adcChValPrev0 = adcChVal0;
+      int adcValCh0 = adc_get_channel_value(ADC, ADC_CHANNEL_0); // Connected to pitch bend
+      if (adcValCh0 != adcValPrevCh0) enqueuePitchBend(adcValCh0, 1);
+      adcValPrevCh0 = adcValCh0;
 
       // handle ADC channel 1 (modulation)
-      int adcChVal1 = adc_get_channel_value(ADC, ADC_CHANNEL_1); // Connected to modulation
-      if (adcChVal1 != adcChValPrev1) enqueueModulation(adcChVal1,1);
-      adcChValPrev1 = adcChVal1;
+      int adcValCh1 = adc_get_channel_value(ADC, ADC_CHANNEL_1); // Connected to modulation
+      if (adcValCh1 != adcValPrevCh1) enqueueCC(ccNumModulation, adcValCh1, 1);
+      adcValPrevCh1 = adcValCh1;
+
+      // handle ADC channel 2 (GP1)
+      int adcValCh2 = adc_get_channel_value(ADC, ADC_CHANNEL_2); // Connected to modulation
+      if (adcValCh2 != adcValPrevCh2) enqueueCC(ccNumGeneralPurpose1, adcValCh2, 1);
+      adcValPrevCh2 = adcValCh2;
+
+      // handle ADC channel 3 (GP2)
+      int adcValCh3 = adc_get_channel_value(ADC, ADC_CHANNEL_3); // Connected to modulation
+      if (adcValCh3 != adcValPrevCh3) enqueueCC(ccNumGeneralPurpose2, adcValCh3, 1);
+      adcValPrevCh3 = adcValCh3;
+
+      // handle ADC channel 4 (GP3)
+      int adcValCh4 = adc_get_channel_value(ADC, ADC_CHANNEL_4); // Connected to modulation
+      if (adcValCh4 != adcValPrevCh4) enqueueCC(ccNumGeneralPurpose3, adcValCh4, 1);
+      adcValPrevCh4 = adcValCh4;
+
+      // handle ADC channel 5 (GP4)
+      int adcValCh5 = adc_get_channel_value(ADC, ADC_CHANNEL_5); // Connected to modulation
+      if (adcValCh5 != adcValPrevCh5) enqueueCC(ccNumGeneralPurpose4, adcValCh5, 1);
+      adcValPrevCh5 = adcValCh5;
 
       // Restart ADC conversion
       adc_start(ADC);
