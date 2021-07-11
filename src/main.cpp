@@ -14,6 +14,10 @@
 
 // MIDI CC numbers
 
+const int highestMsbCcNumber = 31; // The highest CC number that implement a 7-bit MSB CC message.
+const int lowestLsbCcNumber = 32; // The lowest CC number that implement a 7-bit LSB CC message (related to the corresponding MSB message)
+const int highestCcNumber = 127;
+
 const int ccNumModulationMSB = 1;
 const int ccNumModulation = ccNumModulationMSB;
 const int ccNumModulationLSB = ccNumModulationMSB + 32;
@@ -34,6 +38,9 @@ const int ccNumGeneralPurpose4MSB = 19;
 const int ccNumGeneralPurpose4 = ccNumGeneralPurpose4MSB;
 const int ccNumGeneralPurpose4LSB = ccNumGeneralPurpose4MSB + 32;
 
+// MIDI CC handling
+
+bool gcEnable14BitCc = false; // Global configuration ("gc") to enable 14 bit CC handling. If disabled 7 bit CC handling will be used.
 
 // MIDI data structures and functions
 
@@ -46,29 +53,31 @@ CircularBuffer<uint32_t,100> midiBuffer4;
 
 
 struct adcToCtrlMap_t {
-  static const int maxNumAdcRanges = 10; 
+  static const int maxNumAdcRanges = 10; // The highest possible number of ADC ranges that can be defined in any adcToCtrlMap_t object.
   static const int maxNumAdcRangeBorders = maxNumAdcRanges + 1; // N range values yields N+1 range border values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range border values.
-  int numAdcRanges = 0; 
-  int numAdcRangeBorders = 0; // N range values yields N+1 range border values. E.g. val0..val1..val2..val3 defines 3 ranges and requires 4 range border values.  
-  uint16_t adcRangeBorder[maxNumAdcRangeBorders]; // Defines the ADC ranges [adcRangeBorder[0]..adcRangeBorder[1]] , [adcRangeBorder[1]..adcRangeBorder[2]] , ... , [adcRangeBorder[numAdcRangeBorders-2]..adcRangeBorder[numAdcRangeBorders-1]]
+  int numAdcRanges = 0; // Current numner of ADC ranges
+  int numAdcRangeBorders = 0; // Current number of ADC range borders. Should be one more than number of ADC ranges. TODO: Is this variable unnecessary as it can be dedcued?
+  uint16_t adcRangeBorder[maxNumAdcRangeBorders]; // Dynamically defines the current list of ADC ranges [adcRangeBorder[0]..adcRangeBorder[1]] , [adcRangeBorder[1]..adcRangeBorder[2]] , ... , [adcRangeBorder[numAdcRangeBorders-2]..adcRangeBorder[numAdcRangeBorders-1]]
+  uint16_t ctrlRangeBorderHighest = 0; // Dynamically defines the currently highest border of the controller ranges.
   double k[maxNumAdcRanges]; // Slope of the linear equation that maps ADC values in the ranges defined by adcRangeBorder[] to controller values.
   uint16_t m[maxNumAdcRanges]; // Y-intercept of the linear equation that maps ADC values in the ranges defined by adcRangeBorder[] to controller values.
 };
 
 const int atcmIxPitchbend = 0;
-const int atcmIxModulation = 1;
 const int numAdcToCtrlMapArrElements = 16; // Defines the maximum number of different ADC value to MIDI controller value mappings that can be done simultaneously.
 adcToCtrlMap_t adcToCtrlMapArr[numAdcToCtrlMapArrElements];
+
+int atcmArrIxPerCC[highestCcNumber];
 
 struct adcCtrlPair_t {
   uint16_t adcValue;
   uint16_t ctrlValue;
 };
-typedef adcCtrlPair_t borderList_t[];
+typedef adcCtrlPair_t borderList_t[adcToCtrlMap_t::maxNumAdcRangeBorders]; // Pointer to a list of adcCtrlPair_t elements
 
 // setAdcToCtrlMap1(): Set map with one (1) range (and consequently two (2) borders)
 //
-// adcValue0 <= adcValue1
+// adcValue0 < adcValue1
 //
 // ctrlValue0 <= ctrlValue1
 //
@@ -86,11 +95,12 @@ void setAdcToCtrlMap1(adcToCtrlMap_t *aTCM, uint16_t adcBorder0, uint16_t ctrlBo
   aTCM->m[0] = ctrlBorder0;
   aTCM->k[0] = (ctrlBorder1 - ctrlBorder0) / (adcBorder1 - adcBorder0); //k = (y1 - y0) / (x1 - x0)
   aTCM->adcRangeBorder[1] = adcBorder1;
+  aTCM->ctrlRangeBorderHighest = ctrlBorder1;
 }
 
 // setAdcToCtrlMap3(): Set map with three (3) ranges (and consequently four (4) borders)
 //
-// adcValue0 <= adcValue1 <= adcValue2 <= adcValue3
+// adcValue0 < adcValue1 < adcValue2 < adcValue3
 //
 // ctrlValue0 <= ctrlValue1 <= ctrlValue2 <= ctrlValue3
 //
@@ -117,8 +127,11 @@ void setAdcToCtrlMap3(adcToCtrlMap_t *aTCM, uint16_t adcBorder0, uint16_t ctrlBo
   aTCM->m[2] = ctrlBorder2;
   aTCM->k[2] = (ctrlBorder3 - ctrlBorder2) / (adcBorder3 - adcBorder2); //k = (y3 - y2) / (x3 - x2)
   aTCM->adcRangeBorder[3] = adcBorder3;
+  aTCM->ctrlRangeBorderHighest = ctrlBorder3;
 }
 
+
+// The max case with 10 ranges (11 borders)...
 
 void setAdcToCtrlMap10(adcToCtrlMap_t *aTCM, \
   uint16_t adcBorder0, uint16_t ctrlBorder0, \
@@ -177,8 +190,28 @@ void setAdcToCtrlMap10(adcToCtrlMap_t *aTCM, \
   aTCM->k[9] = (ctrlBorder10 - ctrlBorder9) / (adcBorder10 - adcBorder9); //k = (y10 - y9) / (x10 - x9)
   // last border
   aTCM->adcRangeBorder[10] = adcBorder10;
+  aTCM->ctrlRangeBorderHighest = ctrlBorder10;
 }
 
+// setAdcToCtrlMap(): Set map with up to 10 ranges (-> 11 borders)
+//
+// int numBorders: The number of borders, which is the same as the number of elements in <borderList bL> array
+//
+// borderList_t bL: An array of adcCtrlPair_t struct objects, the objects containing one adcValue and one ctrlValue, comprising a border pair. Only [numBorder] pairs need to be provided.
+//  
+// adcValue0 < adcValue1 < adcValue2 < adcValue3
+//
+// ctrlValue0 <= ctrlValue1 <= ctrlValue2 <= ctrlValue3
+//
+//  * ADC values <= bL[0].adcValue are mapped to bL[0].ctrlValue
+//  * ADC values >= bL[numBorders - 1].adcValue are mapped to bL[numBorders - 1].ctrlValue
+//  * ADC values in the range [bL[N].adcValue..bL[N+1].adcValue] are mapped linearly to the range [bL[N].ctrlValue..bL[N+1].ctrlValue]
+//
+// Linear mapping is done by using the well known formula (y = k*x + m), where y=ctrlValue, x=adcValue. Since the full resulting mapping is a sequence of (one or more) linear segments, residing inside their given (sub)range, the parameters k and m must be calculated in such a way that the segments meet on each border between ranges.
+// For each range [bL[N]..bL[N+1]] this is done by the formula: 
+//   m = bL[N].ctrlValue;
+//   k = (bL[N+1].ctrlValue-bL[N].ctrlValue) / (bL[N+1].adcValue-bL[N].adcValue);
+//
 void setAdcToCtrlMap(adcToCtrlMap_t *aTCM, int numBorders, borderList_t bL) {
   assert(numBorders >= 2);
   assert(aTCM);
@@ -191,6 +224,7 @@ void setAdcToCtrlMap(adcToCtrlMap_t *aTCM, int numBorders, borderList_t bL) {
     aTCM->k[border] = (bL[border + 1].ctrlValue - bL[border].ctrlValue) / (bL[border + 1].adcValue - bL[border].adcValue); //k<n> = (y<n+1> - y<n>) / (x<n+1> - x<n>)
   }
   aTCM->adcRangeBorder[numBorders - 1] = bL[numBorders - 1].adcValue;
+  aTCM->ctrlRangeBorderHighest = bL[numBorders - 1].ctrlValue;
 }
 
 // uint16_t is the return value type of choice since the greatest controller value (pitch-bend included) in MIDI 1.0 do not exceed 14 bit size.  
@@ -209,9 +243,10 @@ uint16_t adcToCtrl(adcToCtrlMap_t *aTCM, uint16_t adcValue) {
       return (((adcValue - aTCM->adcRangeBorder[ix-1]) * aTCM->k[ix-1]) + aTCM->m[ix-1]); // since the range 
   } 
   // If no previous range was matched, then ADC value belongs to the highest range and should return the calculated value at the highest ADC border, "pegged".
-  return ((( aTCM->adcRangeBorder[aTCM->numAdcRangeBorders-1] - aTCM->adcRangeBorder[aTCM->numAdcRangeBorders-2]) // The delta of the borders of the highest range... (as if the ADC value had gotten stuck on the high border of the highest range)
-    * aTCM->k[aTCM->numAdcRangeBorders-2]) // multiplied by the coefficient from the highest range...
-    + aTCM->m[aTCM->numAdcRangeBorders-2]); // and then added the offset from the highest range...
+  // return ((( aTCM->adcRangeBorder[aTCM->numAdcRangeBorders-1] - aTCM->adcRangeBorder[aTCM->numAdcRangeBorders-2]) // The delta of the borders of the highest range... (as if the ADC value had gotten stuck on the high border of the highest range)
+  //  * aTCM->k[aTCM->numAdcRangeBorders-2]) // multiplied by the coefficient from the highest range...
+  //  + aTCM->m[aTCM->numAdcRangeBorders-2]); // and then added the offset from the highest range...
+  return aTCM->ctrlRangeBorderHighest;
 }
 
 
@@ -255,7 +290,6 @@ void enqueueNoteOff(byte note, byte velocity, byte channel) {
   midiBuffer4.push(data.data32bit);
 }
 
-
 void enqueuePitchBend(uint16_t adcVal, byte channel) {
 	midiPacket4_t data;
   uint16_t ctrlVal = adcToCtrl(&adcToCtrlMapArr[atcmIxPitchbend], adcVal);
@@ -266,34 +300,45 @@ void enqueuePitchBend(uint16_t adcVal, byte channel) {
   midiBuffer4.push(data.data32bit);
 }
 
-// TODO: Fix handling of 2 messages according to MIDI 1.0 specs
-//  * MSB needs not be resent if only LSB is sent. Receiver should interpret it as a "fine adjustment"
+// According to MIDI 1.0 specs and MSB/LSB CC message pairs (assuming receiver cares about these things):
+//  * MSB needs not be resent if only LSB is sent. Receiver should interpret it as a "fine adjustment".
 //  * If MSB is sent ("coarse adjustment"), LSB will automatically be "reset" to 0 by receiver.
+//  To implement this, each CC needs to remember its latest MSB sent, to see if a new one needs to be resent.
 //
-// TODO: Fix handling of 1 or 2 messages. User needs to be able to select (in the function or globally) if 7-bit or 14-bit resolution should be assumed.
+// User is able to select (globally) if 7-bit or 14-bit resolution should be assumed (aka 7-bit vs 14-bit CC "mode")
 
 void enqueueCC(uint8_t ccNum, uint16_t adcVal, byte channel) {
+  static uint8_t prevCcValMsb[highestMsbCcNumber + 1]; // Remember the previous CC MSB value. Will be 0-initialized (once) by compiler.
 	midiPacket4_t data;
-  uint16_t ctrlVal = adcToCtrl(&adcToCtrlMapArr[atcmIxModulation], adcVal);
-	data.data8bit[0] = 0x0B;
-	data.data8bit[1] = 0xB0 | channel;
-  data.data8bit[2] = ccNum;
-	data.data8bit[3] = (ctrlVal << 7) & (0x7Fu << 7); // filter out the 7 MSbits
-  midiBuffer4.push(data.data32bit); // push modulation MSB message (msg #1)
-  if (ccNum < 32) {
-    data.data8bit[2] = ccNum + 32;
-    data.data8bit[3] = ctrlVal & 0x7Fu; // filter out the 7 LSbits
-    midiBuffer4.push(data.data32bit); // push modulation LSB message (msg #2)
-  }
-}
+  data.data8bit[0] = 0x0B;
+  data.data8bit[1] = 0xB0 | channel;
 
+  uint16_t ctrlVal = adcToCtrl(&adcToCtrlMapArr[atcmArrIxPerCC[ccNum]], adcVal);
+  uint8_t ccValMsb = (ctrlVal >> 7) & (0x7Fu); // Extract the 7 highest bits of the 14-bit controller value and shift it down.
+  uint8_t ccValLsb = ctrlVal & 0x7Fu; // Extract the 7 lowest bits of the 14-bit controller value.
+
+  if (ccNum <= highestMsbCcNumber) { // If CC# is within MSB range
+    if (ccValMsb != prevCcValMsb[ccNum]) {	// if MSB value for CC (ccNum) has changed since last function call (otherwise no use in sending any new MIDI message)...
+      prevCcValMsb[ccNum] = ccValMsb; // Update the "previous CC MSB value"
+      data.data8bit[2] = ccNum;
+      data.data8bit[3] = ccValMsb; // The 7-bit MSB
+      midiBuffer4.push(data.data32bit); // push CC MSB message (msg #1)
+    }
+    //  Assuming 14-bit mode is enabled; the application (almost) always need to resend the LSB message:
+    //  * If MSB has changed it needs to resend LSB since the assumption by the receiver otherwise will be that LSB is reset to 0
+    //    - Only if MSB has changed and the LSB is exactly = 0 there is no need to resend LSB message, but this is probably a rare case in 14-bit mode that can be ignored.
+    //  * If MSB did not change it can be inferred that the LSB must have changed (since *this* function is only called if ADC value has changed)
+    if (gcEnable14BitCc) {
+      data.data8bit[2] = ccNum + lowestLsbCcNumber;
+      data.data8bit[3] = ccValLsb; // The 7-bit LSB
+      midiBuffer4.push(data.data32bit); // push CC LSB message (msg #2)
+    }
+  } 
+}
 
 //
 // toggle pins for observability
 //
-
-
-
 
 #define REG_PIO_PIN_52_SODR REG_PIOB_SODR
 #define REG_PIO_PIN_52_CODR REG_PIOB_CODR
@@ -839,9 +884,28 @@ void setup() {
     /////////////////////////////////////////////////////////////////////////
     // Configure midi controller mappings
     /////////////////////////////////////////////////////////////////////////
-    
-    // setAdcToCtrlMap(adcToCtrlMap *aTCM, uint16_t adcBorder0, uint16_t ctrlBorder0, uint16_t adcBorder1, uint16_t ctrlBorder1, uint16_t adcBorder2, uint16_t ctrlBorder2, uint16_t adcBorder3, uint16_t ctrlBorder3) {
 
+    // Assign adcToControllerMapArray indices to controllers
+    // N.B.! index 0 is reserved for Pitch Bend!
+    atcmArrIxPerCC[ccNumModulation] = 1;
+    atcmArrIxPerCC[ccNumGeneralPurpose1] = 2;
+    atcmArrIxPerCC[ccNumGeneralPurpose2] = 2;
+    atcmArrIxPerCC[ccNumGeneralPurpose3] = 2;
+    atcmArrIxPerCC[ccNumGeneralPurpose3] = 2;
+
+    // TODO: Make these values part of a dynamic callibration procedure and store them in EEPROM or similar
+    {
+      borderList_t tmpBorderList = {{48,0},{2000,8192},{2096,8192},{4047,16383}};
+      setAdcToCtrlMap(&adcToCtrlMapArr[atcmIxPitchbend], 4, tmpBorderList); // ADC value of 2048 is the center value with +/- 48 as "dead zone". 
+    }
+    {  
+      borderList_t tmpBorderList = {{2000,0},{4085,127}};
+      setAdcToCtrlMap(&adcToCtrlMapArr[1], 2, tmpBorderList);
+    }
+    {
+      borderList_t tmpBorderList = {{10,0},{4085,127}};
+      setAdcToCtrlMap(&adcToCtrlMapArr[2], 2, tmpBorderList);
+    }
 
     /////////////////////////////////////////////////////////////////////////
     // Configure ADC
