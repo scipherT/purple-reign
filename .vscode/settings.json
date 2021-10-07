@@ -5,6 +5,7 @@
     "files.associations": {
         "*.tpp": "cpp",
         "chip.h": "c",
-        "cstdint": "cpp"
+        "cstdint": "cpp",
+        "limits": "cpp"
     }
 }
